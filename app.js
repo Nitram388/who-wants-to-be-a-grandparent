@@ -186,7 +186,7 @@
   let player = null;
   let hostState = {
     phase:"intro", question:0, reveal:0, selected:{}, locked:{},
-    lifelines:{}, revealed:false, result:null, started:false
+    lifelines:{}, disabledAnswersByPlayer:{}, lifelineMessages:{}, revealed:false, result:null, started:false
   };
   let localAnswer = null;
   let localLocked = false;
@@ -251,6 +251,28 @@
     return !!(CONFIG.SUPABASE_URL && CONFIG.SUPABASE_PUBLISHABLE_KEY && window.supabase);
   }
 
+  function applyState(payload){
+    if(!payload || typeof payload!=="object") return;
+    const oldQuestion=hostState.question;
+    const oldPhase=hostState.phase;
+    hostState={
+      ...hostState,
+      ...payload,
+      lifelines: payload.lifelines || hostState.lifelines || {},
+      disabledAnswersByPlayer: payload.disabledAnswersByPlayer || hostState.disabledAnswersByPlayer || {},
+      lifelineMessages: payload.lifelineMessages || hostState.lifelineMessages || {}
+    };
+    if(payload.question !== undefined && payload.question !== oldQuestion){
+      localAnswer=null;
+      localLocked=false;
+    }
+    if(role==="player" && payload.phase==="game" && oldPhase!=="game"){
+      localAnswer=null;
+      localLocked=false;
+    }
+    render();
+  }
+
   function connect(code){
     roomCode=code;
     if(!hasRealtimeConfig()){
@@ -258,53 +280,63 @@
       toast("Add Supabase settings in config.js to enable phone joining.");
       return;
     }
+
     supabase=window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_PUBLISHABLE_KEY);
     channel=supabase.channel("wwgb-"+code, {config:{broadcast:{self:true}}});
+
     channel.on("broadcast",{event:"state"}, ({payload})=>{
-      if(role==="player") {
-        const oldQuestion=hostState.question;
-        hostState={...hostState,...payload};
-        if(payload.question !== undefined && payload.question !== oldQuestion){
-          localAnswer=null; localLocked=false;
-        }
-        render();
-      }
+      if(role==="player") applyState(payload);
     });
+
+    channel.on("broadcast",{event:"gameStart"}, ({payload})=>{
+      if(role==="player") applyState(payload);
+    });
+
     channel.on("broadcast",{event:"answer"}, ({payload})=>{
       if(role==="host"){
-        hostState.selected={...hostState.selected,[payload.playerId]:payload.answer};
-        if(payload.locked) hostState.locked={...hostState.locked,[payload.playerId]:true};
-        saveHost(); render();
+        if(payload.lifeline){
+          handlePlayerLifeline(payload.playerId,payload.lifeline);
+          return;
+        }
+        if(payload.answer !== undefined){
+          hostState.selected={...hostState.selected,[payload.playerId]:payload.answer};
+        }
+        if(payload.locked){
+          hostState.locked={...hostState.locked,[payload.playerId]:true};
+        }
+        saveHost();
+        render();
+        broadcastState();
       }
     });
+
     channel.on("broadcast",{event:"join"}, ({payload})=>{
       if(role==="host"){
         toast(payload.name+" joined");
         broadcastState();
+        if(hostState.phase==="game") broadcast("gameStart",hostState);
         render();
       }
     });
+
     channel.on("broadcast",{event:"requestState"}, ()=>{
-      if(role==="host") broadcastState();
-    });
-    channel.on("broadcast",{event:"hostAction"}, ({payload})=>{
-      if(role==="player"){
-        const oldQuestion=hostState.question;
-        hostState={...hostState,...payload};
-        if(payload.question !== undefined && payload.question !== oldQuestion) {
-          localAnswer=null; localLocked=false;
-        }
-        render();
+      if(role==="host"){
+        broadcastState();
+        if(hostState.phase==="game") broadcast("gameStart",hostState);
       }
     });
+
     channel.subscribe(status=>{
       if(status==="SUBSCRIBED"){
         if(role==="player"){
           channel.send({type:"broadcast",event:"join",payload:{name:player.name,playerId:player.id}});
-          // Ask the host for the latest state as well. This makes joining
-          // reliable even if the host changed screens before this phone
-          // finished subscribing to the Realtime channel.
-          setTimeout(()=>channel.send({type:"broadcast",event:"requestState",payload:{playerId:player.id}}),150);
+          // Request repeatedly for a few seconds. This covers the case where
+          // the TV starts the game while this phone is still subscribing.
+          [100,500,1500,3000].forEach(ms=>{
+            setTimeout(()=>{
+              channel?.send({type:"broadcast",event:"requestState",payload:{playerId:player.id}});
+            },ms);
+          });
         }
         render();
       }
@@ -316,16 +348,20 @@
     try { await channel.send({type:"broadcast",event,payload}); } catch(e) {}
   }
   function broadcastState(){
-    // Broadcast immediately and once more shortly afterwards. The second
-    // send helps phones that have only just completed their subscription.
+    // Send the full state. A dedicated gameStart event is also sent so a
+    // phone cannot remain on GET READY if it missed the transition.
     broadcast("state",hostState);
-    setTimeout(()=>broadcast("state",hostState),250);
+    if(hostState.phase==="game") broadcast("gameStart",hostState);
+    setTimeout(()=>{
+      broadcast("state",hostState);
+      if(hostState.phase==="game") broadcast("gameStart",hostState);
+    },250);
   }
 
   function startGame(){
     hostState={phase:"game",question:0,reveal:0,selected:{},locked:{},lifelines:{
       puja:{fifty:true,dad:true,parents:true},marc:{fifty:true,dad:true,parents:true},nathalie:{fifty:true,dad:true,parents:true}
-    },revealed:false,result:null,started:true,disabledAnswers:[]};
+    },disabledAnswersByPlayer:{puja:[],marc:[],nathalie:[]},lifelineMessages:{},revealed:false,result:null,started:true};
     saveHost();
     render();
     syncMusic();
@@ -364,7 +400,7 @@
           hostState.phase="finished"; broadcastState(); render(); syncMusic(); return;
         }
         hostState.question++;
-        hostState.reveal=0; hostState.selected={}; hostState.locked={}; hostState.revealed=false; hostState.result=null; hostState.disabledAnswers=[];
+        hostState.reveal=0; hostState.selected={}; hostState.locked={}; hostState.revealed=false; hostState.result=null; hostState.disabledAnswersByPlayer={puja:[],marc:[],nathalie:[]}; hostState.lifelineMessages={};
         broadcastState(); render(); syncMusic(); return;
       }
     }
@@ -386,19 +422,32 @@
     render();
   }
 
+  function handlePlayerLifeline(playerId,kind){
+    if(role!=="host" || !playerId || !hostState.lifelines?.[playerId]?.[kind]) return;
+    hostState.lifelines[playerId][kind]=false;
+
+    if(kind==="fifty"){
+      const q=QUESTIONS[hostState.question];
+      const wrong=[0,1,2,3].filter(i=>i!==q.c).sort(()=>Math.random()-.5).slice(0,2);
+      hostState.disabledAnswersByPlayer={...(hostState.disabledAnswersByPlayer||{}),[playerId]:wrong};
+      hostState.lifelineMessages={...(hostState.lifelineMessages||{}),[playerId]:"Diaper Surprise used — two wrong answers removed."};
+    } else if(kind==="dad"){
+      hostState.lifelineMessages={...(hostState.lifelineMessages||{}),[playerId]:"📞 Call Dad — Martin is ready for your call."};
+    } else if(kind==="parents"){
+      hostState.lifelineMessages={...(hostState.lifelineMessages||{}),[playerId]:"👨‍👩‍👧 Ask the Parents — discuss it with Radhika and Martin."};
+    }
+
+    saveHost();
+    broadcastState();
+    render();
+  }
+
   function useLifeline(kind){
     if(role!=="player" || !player) return;
     const current=hostState.lifelines?.[player.id]?.[kind];
     if(!current){toast("You've already used that joker.");return;}
-    hostState.lifelines[player.id][kind]=false;
-    if(kind==="fifty"){
-      const q=QUESTIONS[hostState.question];
-      const wrong=[0,1,2,3].filter(i=>i!==q.c).sort(()=>Math.random()-.5).slice(0,2);
-      hostState.disabledAnswers=wrong;
-    }
-    broadcast("hostAction",{...hostState});
     broadcast("answer",{playerId:player.id,lifeline:kind});
-    render();
+    toast(kind==="fifty" ? "Diaper Surprise activated." : kind==="dad" ? "Call Dad activated." : "Ask the Parents activated.");
   }
 
   function hostLifeline(kind){
@@ -557,13 +606,24 @@
       return;
     }
     if(hostState.phase==="intro"){
-      app.innerHTML=`<div class="phone waiting"><div class="eyebrow">YOU ARE ${player.name.toUpperCase()}</div><div class="phone-icon">★</div><h1>GET READY</h1><p>Waiting for Martin to start the game...</p><div class="connected">● CONNECTED</div></div>`; return;
+      app.innerHTML=`<div class="phone waiting">
+        <div class="eyebrow">YOU ARE ${player.name.toUpperCase()}</div>
+        <div class="phone-icon">★</div>
+        <h1>GET READY</h1>
+        <p>Waiting for Martin to start the game...</p>
+        <div class="connected">● CONNECTED</div>
+        <div class="jokers waiting-jokers">
+          <button disabled>🍼<span>Diaper<br>Surprise</span></button>
+          <button disabled>📞<span>Call the<br>Dad</span></button>
+          <button disabled>👨‍👩‍👧<span>Ask the<br>Parents</span></button>
+        </div>
+      </div>`; return;
     }
     if(hostState.phase==="finished"){
       app.innerHTML=`<div class="phone waiting"><div class="phone-icon">★</div><h1>CONGRATULATIONS!</h1><p>What a grandparent.</p></div>`; return;
     }
     const q=QUESTIONS[hostState.question];
-    const disabled=hostState.disabledAnswers||[];
+    const disabled=hostState.disabledAnswersByPlayer?.[player.id]||[];
     const allVisible=hostState.reveal>=4;
     app.innerHTML=`<div class="phone player-game">
       <div class="phone-head"><div>GRANDPARENT</div><b>${player.name}</b><span>Q${hostState.question+1}</span></div>
@@ -572,6 +632,7 @@
       <div class="phone-answers">${q.a.map((a,i)=>`<button class="${localAnswer===i?'chosen':''} ${disabled.includes(i)?'disabled':''} ${hostState.revealed&&i===q.c?'correct':''} ${hostState.revealed&&i!==q.c?'wrong':''}" ${disabled.includes(i)||localLocked?'disabled':''} data-answer="${i}"><b>${"ABCD"[i]}</b>${esc(a)}</button>`).join("")}</div>
       <button class="lock-btn" ${localAnswer===null||localLocked||!allVisible?'disabled':''}>${localLocked?'🔒 ANSWER LOCKED':'LOCK IN ANSWER'}</button>
       <div class="jokers"><button data-j="fifty" ${!hostState.lifelines?.[player.id]?.fifty?'disabled':''}>🍼<span>Diaper<br>Surprise</span></button><button data-j="dad" ${!hostState.lifelines?.[player.id]?.dad?'disabled':''}>📞<span>Call the<br>Dad</span></button><button data-j="parents" ${!hostState.lifelines?.[player.id]?.parents?'disabled':''}>👨‍👩‍👧<span>Ask the<br>Parents</span></button></div>
+      ${hostState.lifelineMessages?.[player.id]?`<div class="phone-status joker-message">${esc(hostState.lifelineMessages[player.id])}</div>`:""}
       <div class="phone-status">${localLocked?'Waiting for the other grandparents to lock in...':!allVisible?'Watch the TV for the answer choices.':'Choose your answer.'}</div>
     </div>`;
     document.querySelectorAll("[data-answer]").forEach(b=>b.onclick=()=>chooseAnswer(+b.dataset.answer));
@@ -610,7 +671,12 @@
   }
 
   loadHost();
-  if(role==="host") setTimeout(syncMusic,100);
+  if(role==="host"){
+    setTimeout(syncMusic,100);
+    setInterval(()=>{
+      if(channel && roomCode && hostState.phase!=="finished") broadcastState();
+    },1500);
+  }
   if(role==="player"){
     const saved=localStorage.getItem("wwgb-player");
     if(saved) player=PLAYERS.find(p=>p.id===saved)||null;
