@@ -187,7 +187,8 @@
   let player = null;
   let hostState = {
     phase:"intro", question:0, reveal:0, selected:{}, locked:{},
-    lifelines:{}, revealed:false, result:null, started:false
+    lifelines:{}, revealed:false, result:null, started:false,
+    scores:{puja:0, marc:0, nathalie:0}, scoredQuestion:-1
   };
   let localAnswer = null;
   let localLocked = false;
@@ -455,6 +456,21 @@
           if(hostState.phase==="game" && hostState.reveal===6){
             hostState.revealed=true; hostState.reveal=7;
             hostState.result=QUESTIONS[hostState.question].c;
+
+            // Award Baby Hours once for this question. A correct answer adds
+            // the question value to that grandparent's running tally; a
+            // wrong answer adds 0. Nobody is eliminated for getting one wrong.
+            if(hostState.scoredQuestion !== hostState.question){
+              const q=QUESTIONS[hostState.question];
+              hostState.scores=hostState.scores||{puja:0,marc:0,nathalie:0};
+              PLAYERS.forEach(p=>{
+                if(hostState.selected[p.id]===q.c){
+                  hostState.scores[p.id]=(hostState.scores[p.id]||0)+Number(q.value.replace(/,/g,""));
+                }
+              });
+              hostState.scoredQuestion=hostState.question;
+              saveHost();
+            }
             broadcastState(); render(); syncMusic();
           }
         },3000);
@@ -591,7 +607,9 @@
       return;
     }
     if(hostState.phase==="finished"){
-      app.innerHTML=`<div class="cinema finale"><div class="eyebrow">RADHIKA'S GODH BHARAI</div><div class="trophy">★</div><h1>CONGRATULATIONS!</h1><div class="million">1,000,000</div><div class="baby-hours">BABY HOURS</div><p>Puja • Marc • Nathalie</p><button class="gold-btn" id="restart">PLAY AGAIN</button></div>`;
+      const scores=hostState.scores||{};
+      const tally=PLAYERS.map(p=>({name:p.name,score:Number(scores[p.id]||0)}));
+      app.innerHTML=`<div class="cinema finale"><div class="eyebrow">RADHIKA'S GODH BHARAI</div><div class="trophy">★</div><h1>FINAL BABY HOURS</h1><div class="final-tally">${tally.map((p,i)=>`<div class="final-score"><span>${i+1}</span><b>${p.name}</b><strong>${p.score.toLocaleString()}</strong><small>BABY HOURS</small></div>`).join('')}</div><p>Every correct answer added to your personal tally. Wrong answers = 0 for that question — nobody is eliminated.</p><button class="gold-btn" id="restart">PLAY AGAIN</button></div>`;
       $("#restart").onclick=()=>{stopTrack();localStorage.removeItem("wwgb-host-state");location.reload()};
       return;
     }
@@ -618,7 +636,11 @@
             <div class="lock-status">${PLAYERS.map(p=>`<span class="${hostState.locked[p.id]?'locked':''}">${hostState.locked[p.id]?'🔒':'○'} ${p.name}</span>`).join("")}</div>
             ${reveal===5?'<div class="suspense">LOCKED IN...<br><strong>LET\'S SEE IF YOU ARE RIGHT</strong></div>':''}
             ${reveal===6?'<div class="suspense">THE CORRECT ANSWER IS...</div>':''}
-            ${hostState.revealed?`<div class="result ${PLAYERS.every(p=>hostState.selected[p.id]===q.c)?'all-right':''}">${PLAYERS.every(p=>hostState.selected[p.id]===q.c)?'ALL THREE ARE CORRECT!':'THE ANSWER IS '+("ABCD"[q.c])}<br><strong>+${q.value} BABY HOURS</strong></div>`:""}
+            ${hostState.revealed?`<div class="result ${PLAYERS.every(p=>hostState.selected[p.id]===q.c)?'all-right':''}">
+              <div>${PLAYERS.every(p=>hostState.selected[p.id]===q.c)?'ALL THREE ARE CORRECT!':'THE ANSWER IS '+("ABCD"[q.c])}</div>
+              <div class="question-tally">${PLAYERS.map(p=>{const right=hostState.selected[p.id]===q.c; return `<span><b>${p.name}</b> ${right?`+${q.value}`:'+0'} <small>${right?'✓':'✕'}</small></span>`;}).join('')}</div>
+              <strong>RUNNING TALLY: ${PLAYERS.map(p=>`${p.name} ${Number(hostState.scores?.[p.id]||0).toLocaleString()}`).join(' • ')}</strong>
+            </div>`:""}
           </div>
         </div>
         <div class="bottom-bar"><span>→ / SPACE: NEXT</span><span>H: HOST CONTROLS</span><span>ROOM: ${roomCode}</span></div>
@@ -706,7 +728,8 @@
 
     app.innerHTML=`<div class="phone player-game">
       <div class="phone-head"><div>GRANDPARENT</div><b>${player.name}</b><span>Q${hostState.question+1}</span></div>
-      <div class="phone-prize">${q.value}<small>BABY HOURS</small></div>
+      <div class="phone-score">TALLY: <strong>${Number(hostState.scores?.[player.id]||0).toLocaleString()}</strong> BABY HOURS</div>
+      <div class="phone-prize">${q.value}<small>BABY HOURS AVAILABLE</small></div>
       <div class="phone-question">${esc(q.q)}</div>
       <div class="phone-answers">${q.a.map((a,i)=>`<button class="${localAnswer===i?'chosen':''} ${disabled.includes(i)?'disabled':''} ${hostState.revealed&&i===q.c?'correct':''} ${hostState.revealed&&i!==q.c?'wrong':''}" ${disabled.includes(i)||localLocked?'disabled':''} data-answer="${i}"><b>${"ABCD"[i]}</b>${esc(a)}</button>`).join("")}</div>
       <button class="lock-btn" ${localAnswer===null||localLocked||!allVisible?'disabled':''}>${localLocked?'🔒 ANSWER LOCKED':'LOCK IN ANSWER'}</button>
@@ -716,7 +739,7 @@
         <button data-j="parents" ${!life.parents||!canUseJokers?'disabled':''}>👨‍👩‍👧<span>Ask the<br>Parents</span></button>
       </div>
       ${localLifelineNotice?`<div class="lifeline-notice">${esc(localLifelineNotice)}</div>`:""}
-      <div class="phone-status">${localLocked?'Waiting for the other grandparents to lock in...':!allVisible?'Watch the TV — the answers will appear one at a time.':'Choose your answer.'}</div>
+      <div class="phone-status">${hostState.revealed ? (hostState.selected[player.id]===q.c ? `✓ CORRECT — +${q.value} Baby Hours` : `✕ INCORRECT — +0 Baby Hours`) : localLocked?'Waiting for the other grandparents to lock in...':!allVisible?'Watch the TV — the answers will appear one at a time.':'Choose your answer.'}</div>
     </div>`;
 
     document.querySelectorAll("[data-answer]").forEach(b=>b.onclick=()=>chooseAnswer(+b.dataset.answer));

@@ -9,3 +9,49 @@ button{font:inherit}.cinema{width:100vw;height:100vh;display:flex;flex-direction
 @media(max-width:800px){.game-main{grid-template-columns:1fr;padding:10px 15px}.ladder{display:none}.answers{gap:8px}.answer{min-height:52px}.qr-card{flex-direction:column}.instructions{border-left:0;border-top:1px solid #ffffff25;padding:15px 0 0;text-align:center}.top-title{font-size:18px}}
 
 .audio-note{font-size:11px!important;color:#8791c7!important;margin-top:8px!important}
+
+/* Running Baby Hours tally */
+.phone-score{
+  text-align:center;
+  margin:6px 0 10px;
+  font-size:12px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  opacity:.9;
+}
+.phone-score strong{font-size:16px;}
+.question-tally{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:center;
+  gap:8px;
+  margin:14px 0 10px;
+}
+.question-tally span{
+  padding:7px 10px;
+  border:1px solid rgba(255,255,255,.18);
+  border-radius:8px;
+  background:rgba(0,0,0,.18);
+  font-size:13px;
+}
+.question-tally small{margin-left:3px;}
+.final-tally{
+  width:min(760px,92vw);
+  display:grid;
+  gap:10px;
+  margin:22px auto;
+}
+.final-score{
+  display:grid;
+  grid-template-columns:42px 1fr auto auto;
+  align-items:center;
+  gap:14px;
+  padding:14px 18px;
+  border:1px solid rgba(255,255,255,.2);
+  border-radius:12px;
+  background:rgba(0,0,0,.2);
+}
+.final-score span{font-size:20px;opacity:.65;}
+.final-score b{font-size:20px;}
+.final-score strong{font-size:24px;}
+.final-score small{font-size:10px;letter-spacing:.12em;opacity:.7;}
