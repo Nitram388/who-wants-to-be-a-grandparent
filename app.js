@@ -469,9 +469,59 @@
   }
 
   function makeQR(){
-    const url=new URL(location.href); url.search="?join="+roomCode; url.hash="";
+    const url=new URL(location.href);
+    url.search="?join="+encodeURIComponent(roomCode);
+    url.hash="";
+    const text=url.toString();
     const el=$("#qr");
-    if(window.QRCode && el) QRCode.toCanvas(url.toString(),{width:190,margin:1,color:{dark:"#fff",light:"#0a0b2d"}},(err,canvas)=>{if(!err)el.appendChild(canvas)});
+    if(!el) return;
+
+    el.innerHTML="";
+    el.setAttribute("aria-label","Scan this QR code to join the game");
+
+    // Primary: render locally with the QRCode library already loaded by index.html.
+    if(window.QRCode && typeof QRCode.toCanvas==="function"){
+      try{
+        QRCode.toCanvas(text,{
+          width:190,
+          margin:2,
+          color:{dark:"#ffffff",light:"#0a0b2d"},
+          errorCorrectionLevel:"M"
+        },(err,canvas)=>{
+          if(!err && canvas){
+            canvas.style.display="block";
+            canvas.style.width="190px";
+            canvas.style.height="190px";
+            el.appendChild(canvas);
+            return;
+          }
+          renderQRFallback(el,text);
+        });
+        return;
+      }catch(e){
+        renderQRFallback(el,text);
+        return;
+      }
+    }
+
+    // Fallback: use a QR image endpoint if the local library was blocked by a
+    // browser/CDN issue. The actual join URL is encoded into the image.
+    renderQRFallback(el,text);
+  }
+
+  function renderQRFallback(el,text){
+    const img=document.createElement("img");
+    img.alt="Scan to join the game";
+    img.width=190;
+    img.height=190;
+    img.style.display="block";
+    img.style.width="190px";
+    img.style.height="190px";
+    img.src="https://api.qrserver.com/v1/create-qr-code/?size=190x190&margin=4&data="+encodeURIComponent(text);
+    img.onerror=()=>{
+      el.innerHTML='<div style="width:190px;height:190px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:13px;color:#fff;background:#0a0b2d;border:1px solid rgba(255,255,255,.25);padding:12px;box-sizing:border-box">QR unavailable.<br>Enter room code<br><strong>'+String(roomCode).replace(/[&<>"']/g,"")+'</strong><br>on the join page.</div>';
+    };
+    el.appendChild(img);
   }
 
   function renderPlayer(){
