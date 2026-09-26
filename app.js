@@ -261,7 +261,14 @@
     supabase=window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_PUBLISHABLE_KEY);
     channel=supabase.channel("wwgb-"+code, {config:{broadcast:{self:true}}});
     channel.on("broadcast",{event:"state"}, ({payload})=>{
-      if(role==="player") { hostState={...hostState,...payload}; render(); }
+      if(role==="player") {
+        const oldQuestion=hostState.question;
+        hostState={...hostState,...payload};
+        if(payload.question !== undefined && payload.question !== oldQuestion){
+          localAnswer=null; localLocked=false;
+        }
+        render();
+      }
     });
     channel.on("broadcast",{event:"answer"}, ({payload})=>{
       if(role==="host"){
@@ -277,10 +284,14 @@
         render();
       }
     });
+    channel.on("broadcast",{event:"requestState"}, ()=>{
+      if(role==="host") broadcastState();
+    });
     channel.on("broadcast",{event:"hostAction"}, ({payload})=>{
       if(role==="player"){
+        const oldQuestion=hostState.question;
         hostState={...hostState,...payload};
-        if(payload.question !== undefined && payload.question !== hostState.question) {
+        if(payload.question !== undefined && payload.question !== oldQuestion) {
           localAnswer=null; localLocked=false;
         }
         render();
@@ -288,22 +299,37 @@
     });
     channel.subscribe(status=>{
       if(status==="SUBSCRIBED"){
-        if(role==="player") channel.send({type:"broadcast",event:"join",payload:{name:player.name,playerId:player.id}});
+        if(role==="player"){
+          channel.send({type:"broadcast",event:"join",payload:{name:player.name,playerId:player.id}});
+          // Ask the host for the latest state as well. This makes joining
+          // reliable even if the host changed screens before this phone
+          // finished subscribing to the Realtime channel.
+          setTimeout(()=>channel.send({type:"broadcast",event:"requestState",payload:{playerId:player.id}}),150);
+        }
         render();
       }
     });
   }
 
   async function broadcast(event,payload){
-    if(channel) await channel.send({type:"broadcast",event,payload});
+    if(!channel) return;
+    try { await channel.send({type:"broadcast",event,payload}); } catch(e) {}
   }
-  function broadcastState(){ broadcast("state",hostState); }
+  function broadcastState(){
+    // Broadcast immediately and once more shortly afterwards. The second
+    // send helps phones that have only just completed their subscription.
+    broadcast("state",hostState);
+    setTimeout(()=>broadcast("state",hostState),250);
+  }
 
   function startGame(){
     hostState={phase:"game",question:0,reveal:0,selected:{},locked:{},lifelines:{
       puja:{fifty:true,dad:true,parents:true},marc:{fifty:true,dad:true,parents:true},nathalie:{fifty:true,dad:true,parents:true}
-    },revealed:false,result:null,started:true};
-    saveHost(); broadcastState(); render(); syncMusic();
+    },revealed:false,result:null,started:true,disabledAnswers:[]};
+    saveHost();
+    render();
+    syncMusic();
+    broadcastState();
   }
 
   function allLocked(){
@@ -338,7 +364,7 @@
           hostState.phase="finished"; broadcastState(); render(); syncMusic(); return;
         }
         hostState.question++;
-        hostState.reveal=0; hostState.selected={}; hostState.locked={}; hostState.revealed=false; hostState.result=null;
+        hostState.reveal=0; hostState.selected={}; hostState.locked={}; hostState.revealed=false; hostState.result=null; hostState.disabledAnswers=[];
         broadcastState(); render(); syncMusic(); return;
       }
     }
