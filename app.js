@@ -343,33 +343,33 @@
       }
     });
 
-    channel.subscribe(status=>{
+    channel.subscribe(async (status, err)=>{
       if(status==="SUBSCRIBED"){
         channelReady=true;
 
         if(role==="host"){
-          // Crucial: if Martin pressed → before the channel finished
-          // subscribing, this sends the current state now.
-          broadcastState();
+          // Send the current state immediately, using HTTP Broadcast when
+          // available, so a fast host action cannot be lost during WebSocket
+          // startup.
+          await broadcastState();
         } else {
-          channel.send({
-            type:"broadcast",
-            event:"join",
-            payload:{name:player?.name,playerId:player?.id}
-          });
-          // Repeated state requests make the phone resilient to joining at
-          // exactly the same moment the host changes question/reveal.
+          await broadcast("join",{name:player?.name,playerId:player?.id});
+          // Ask for state repeatedly. These use the same broadcast path and
+          // therefore don't depend on a race with the player's WebSocket.
           [100,400,1000,2000].forEach(ms=>{
             setTimeout(()=>{
               if(channel && channelReady){
-                channel.send({
-                  type:"broadcast",
-                  event:"requestState",
-                  payload:{playerId:player?.id}
-                });
+                broadcast("requestState",{playerId:player?.id});
               }
             },ms);
           });
+        }
+        render();
+      } else {
+        channelReady=false;
+        console.error("WWGB Realtime status:",status,err||"");
+        if(role==="host"){
+          toast("Realtime: "+status);
         }
         render();
       }
@@ -377,21 +377,42 @@
   }
 
   async function broadcast(event,payload){
-    if(!channel || !channelReady) return false;
+    if(!channel) return false;
     try{
-      await channel.send({type:"broadcast",event,payload});
-      return true;
+      // Prefer Supabase's HTTP Broadcast path. It does not depend on the
+      // sender's WebSocket being fully ready, while still delivering to all
+      // WebSocket subscribers on the same public topic.
+      if(typeof channel.httpSend==="function"){
+        await channel.httpSend(event,payload);
+        return true;
+      }
+
+      // Fallback for older supabase-js versions.
+      if(!channelReady) return false;
+      const result=await channel.send({
+        type:"broadcast",
+        event,
+        payload
+      });
+      return result===undefined || result?.status==="ok" || result===null;
     }catch(e){
+      console.error("WWGB broadcast failed",event,e);
+      if(role==="host"){
+        toast("Realtime send failed: "+(e?.message||"check connection"));
+      }
       return false;
     }
   }
 
-  function broadcastState(){
-    if(role!=="host" || !channel || !channelReady) return;
+  async function broadcastState(){
+    if(role!=="host" || !channel) return false;
     const snapshot=JSON.parse(JSON.stringify(hostState));
-    broadcast("state",snapshot);
+    const ok=await broadcast("state",snapshot);
+    // Redundant sends cover phones that are joining at the exact moment the
+    // TV advances the show.
     setTimeout(()=>broadcast("state",JSON.parse(JSON.stringify(hostState))),150);
     setTimeout(()=>broadcast("state",JSON.parse(JSON.stringify(hostState))),600);
+    return ok;
   }
 
   function startGame(){
